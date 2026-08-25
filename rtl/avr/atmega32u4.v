@@ -99,6 +99,13 @@ module atmega32u4 # (
     input clk_pll,
     output [`ROM_ADDR_WIDTH-1:0] pgm_addr,
     input [15:0] pgm_data,
+    // SPM Page Erase/Write only -- a real write port into program memory. The board-level file
+    // is responsible for actually wiring this into its real ROM array (a second write port,
+    // alongside its existing loader port, since this engine has never needed to write program
+    // memory before).
+    output [`ROM_ADDR_WIDTH-1:0] spm_pgm_addr,
+    output [15:0] spm_pgm_data,
+    output spm_pgm_write,
     input [7:0] joystick_analog,
     input status,
     input PF4, PF5, PF6, PF7, PE6, PB4,
@@ -978,6 +985,9 @@ mega # (
     // FLASH space data interface.
     .pgm_addr(pgm_addr),
     .pgm_data(pgm_data),
+    .spm_pgm_addr(spm_pgm_addr),
+    .spm_pgm_data(spm_pgm_data),
+    .spm_pgm_write(spm_pgm_write),
     // RAM space data interface.
     .data_addr(data_addr),
     .data_out(core_data_out),

@@ -150,8 +150,21 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 reg  [1:0][7:0] rom[16384];
 wire [13:0] pgm_addr;
 reg  [15:0] pgm_data;
+wire [13:0] spm_pgm_addr;
+wire [15:0] spm_pgm_data;
+wire        spm_pgm_write;
 
-always @ (posedge clk_avr) pgm_data <= rom[pgm_addr];
+// SPM Page Erase/Write share this same clk_avr port with the normal instruction read rather than
+// adding a genuine third port -- Cyclone V M10K natively supports 2 ports (this one, plus the
+// clk_sys loader port below), not 3. Safe because PC is frozen for the CPU's entire duration of
+// a Page Erase/Write (see mega-core.v's own PC<=PC entry for INSTRUCTION_SPM): pgm_data holding
+// its previous value on a write cycle is never observed, since mega-core.v only ever latches a
+// fresh pgm_data into the instruction it's decoding when state_cnt==STEP0, which never happens
+// until the whole SPM operation completes and normal fetching resumes on its own next cycle.
+always @ (posedge clk_avr) begin
+    if (spm_pgm_write) rom[spm_pgm_addr] <= spm_pgm_data;
+    else pgm_data <= rom[pgm_addr];
+end
 
 wire [3:0] digit = (ioctl_dout[7:4] != 3) ? (ioctl_dout[3:0] + 4'd9) : ioctl_dout[3:0];
 always @ (posedge clk_sys) begin
@@ -198,6 +211,9 @@ arduboy_board arduboy_board
     .rst(reset),
     .pgm_addr(pgm_addr),
     .pgm_data(pgm_data),
+    .spm_pgm_addr(spm_pgm_addr),
+    .spm_pgm_data(spm_pgm_data),
+    .spm_pgm_write(spm_pgm_write),
     .buttons(~(status[1] ? {joystick[5:4], joystick[1], joystick[0], joystick[2], joystick[3]} : joystick[5:0])),
     .joystick_analog(status[16] ? {~paddle[7],paddle[6:0]} : joystick_analog[7:0]),
     .status(|status[16:15]),

@@ -13,6 +13,10 @@ module arduboy_board
     input clk_pll,
     output [13:0] pgm_addr,
     input [15:0] pgm_data,
+    // SPM Page Erase/Write only -- pass-through to the board's real ROM array.
+    output [13:0] spm_pgm_addr,
+    output [15:0] spm_pgm_data,
+    output spm_pgm_write,
     input [5:0] buttons,
     input [7:0] joystick_analog,
     input status,
@@ -31,6 +35,9 @@ atmega32u4 atmega32u4
     .clk_pll(clk_pll),
     .pgm_addr(pgm_addr),
     .pgm_data(pgm_data),
+    .spm_pgm_addr(spm_pgm_addr),
+    .spm_pgm_data(spm_pgm_data),
+    .spm_pgm_write(spm_pgm_write),
     .joystick_analog(joystick_analog),
     .status(status),
 

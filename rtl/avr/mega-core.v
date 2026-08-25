@@ -181,6 +181,14 @@ module mega #(
 	// targets I/O space, so (unlike data_in_int) needs no address-mapped-register mux.
 	output reg [RAM_ADDR_WIDTH - 1:0]data_addr2,
 	input [7:0]data_in2,
+	// SPM Page Erase/Write only -- a real write port into program memory, something this engine
+	// has never had before. One real page word per cycle (spm_pgm_write pulses once per word,
+	// spm_pgm_addr/spm_pgm_data present that word's real {PCPAGE, PCWORD} address and its value --
+	// 0xFFFF for Page Erase, the temp buffer's contents for Page Write). The consuming top-level
+	// file is responsible for actually wiring this into its real ROM array.
+	output reg [ROM_ADDR_WIDTH - 1:0]spm_pgm_addr,
+	output reg [15:0]spm_pgm_data,
+	output reg spm_pgm_write,
 	input [(VECTOR_INT_TABLE_SIZE == 0 ? 0 : VECTOR_INT_TABLE_SIZE - 1):0]int_sig,
 	output reg [(VECTOR_INT_TABLE_SIZE == 0 ? 0 : VECTOR_INT_TABLE_SIZE - 1):0]int_rst
     );
@@ -218,6 +226,10 @@ reg [15:0]spm_buffer[0:(2**SPM_PAGE_ADDR_WIDTH)-1];
 // decodes -- by the time the buffer-fill/erase/write action itself runs (STEP1), SPMCSR has
 // already gone back to 0 and can no longer be read to tell which operation was meant.
 reg [4:0]spm_op_latched;
+// Which word of the target page Page Erase/Write is currently on -- walks 0 to 2**
+// SPM_PAGE_ADDR_WIDTH-1 (every real page word), one per clock cycle. Not used for a plain
+// buffer-fill SPM.
+reg [SPM_PAGE_ADDR_WIDTH-1:0]spm_page_word_cnt;
 reg [7:0]EIND;
 reg [7:0]RAMPZ;
 reg [7:0]RAMPY;
@@ -574,6 +586,10 @@ initial begin
 	SPMCSR = 8'h00;
 	spm_arm_cnt = 3'h0;
 	spm_op_latched = 5'h00;
+	spm_page_word_cnt = 0;
+	spm_pgm_addr = 0;
+	spm_pgm_data = 16'h0000;
+	spm_pgm_write = 1'b0;
 end
 
 reg halt_ack_n;
@@ -608,6 +624,7 @@ begin
 		halt_int <=  halt;
 		data_write_int <= 1'b0;
 		data_read_int <= 1'b0;
+		spm_pgm_write <= 1'b0;
 		reg_rdw <= 1'b0;
 		skip_next_clock <= 1'b0;
 		if(&{USE_HALT == "TRUE", halt_int, state_cnt == `STEP0, ~skip_next_clock, ~int_registered})
@@ -801,6 +818,9 @@ begin
 							spm_op_latched <= SPMCSR[4:0];
 							SPMCSR[4:0] <= 5'h00;
 							spm_arm_cnt <= 3'h0;
+							// Fresh walk-through-the-page counter for a new SPM (Page Erase/Write
+							// only -- irrelevant for a plain buffer-fill, harmless to always reset).
+							spm_page_word_cnt <= 0;
 						end
 						default:
 						begin
@@ -851,11 +871,51 @@ begin
 				// timing shape ICALL already uses for its own Z operand -- not the same-cycle path,
 				// deliberately, since SPM's own opcode has no register field to trust for same-cycle
 				// use the way a normal ALU op's Rd/Rr fields do.
+				// SPM Step 3: Page Erase (SPMEN+PGERS, spm_op_latched==5'b00011) and Page Write
+				// (SPMEN+PGWRT, spm_op_latched==5'b00101) both act on the REAL target flash page
+				// directly (datasheet SS24.8.1/24.8.3), NOT the temp buffer -- confirmed by reading
+				// the datasheet's own Page Erase description directly, correcting this project's
+				// own earlier, wrong assumption that Page Erase resets the buffer. Both walk every
+				// real word of the page (spm_page_word_cnt, incremented in "Set spm_page_word_cnt"
+				// below), one word per clock cycle -- genuinely faster than real hardware's
+				// millisecond-scale physical flash-write time (Option B's deliberate
+				// simplification), but still multiple real cycles for a multi-word page, unlike
+				// every other instruction in this file. PC stays frozen throughout (see the
+				// existing STEP0/STEP1 PC<=PC entry above, which already covers every repeated
+				// STEP1 cycle here, not just one). Page Write also auto-erases the buffer entry it
+				// just committed (datasheet SS24.8.2: "temporary buffer will auto-erase after a
+				// Page Write operation") -- done incrementally, one word per cycle, on the same
+				// walk, rather than needing a separate whole-array clear.
 				casex({execute, state_cnt, CORE_TYPE, pgm_data_registered})
 					{1'b1, `STEP1, `INSTRUCTION_SPM}:
 					begin
-						if(spm_op_latched == 5'b00001)
-							spm_buffer[ijmp_z[SPM_PAGE_ADDR_WIDTH:1]] <= reg_rs1;
+						case(spm_op_latched)
+							5'b00001: // plain SPMEN: page-buffer fill (Step 2)
+								spm_buffer[ijmp_z[SPM_PAGE_ADDR_WIDTH:1]] <= reg_rs1;
+							5'b00011: // SPMEN+PGERS: Page Erase -- real flash page, all words 0xFFFF
+							begin
+								spm_pgm_addr <= {ijmp_z[ROM_ADDR_WIDTH:SPM_PAGE_ADDR_WIDTH+1], spm_page_word_cnt};
+								spm_pgm_data <= 16'hFFFF;
+								spm_pgm_write <= 1'b1;
+							end
+							5'b00101: // SPMEN+PGWRT: Page Write -- commit buffer to real flash page
+							begin
+								spm_pgm_addr <= {ijmp_z[ROM_ADDR_WIDTH:SPM_PAGE_ADDR_WIDTH+1], spm_page_word_cnt};
+								spm_pgm_data <= spm_buffer[spm_page_word_cnt];
+								spm_pgm_write <= 1'b1;
+								spm_buffer[spm_page_word_cnt] <= 16'hFFFF;
+							end
+						endcase
+					end
+				endcase
+	/* Set "spm_page_word_cnt" */ /*************************************************************/
+				// Advances once per cycle while Page Erase/Write is still walking the page;
+				// irrelevant (never incremented) for a plain buffer-fill SPM.
+				casex({execute, state_cnt, CORE_TYPE, pgm_data_registered})
+					{1'b1, `STEP1, `INSTRUCTION_SPM}:
+					begin
+						if(spm_op_latched == 5'b00011 || spm_op_latched == 5'b00101)
+							spm_page_word_cnt <= spm_page_word_cnt + 1'b1;
 					end
 				endcase
 	/* Set "rs1a" */ /*************************************************************/
@@ -1367,6 +1427,15 @@ begin
 					// datasheet-mandated cycle count exists for SPM itself (only the full physical
 					// flash-write time, which this project's Option B deliberately doesn't model).
 					{1'b1, `STEP0, `INSTRUCTION_SPM}: state_cnt <= `STEP1;
+					// Page Erase/Write (Step 3) repeat at STEP1 -- one real page word per cycle --
+					// until spm_page_word_cnt has walked every word (all-1s = the last one). A
+					// plain buffer-fill (spm_op_latched==5'b00001) never matches this condition, so
+					// it correctly falls through to the earlier-scheduled STEP0 default after its
+					// single STEP1 cycle, same as before this step.
+					{1'b1, `STEP1, `INSTRUCTION_SPM}:
+						if((spm_op_latched == 5'b00011 || spm_op_latched == 5'b00101) &
+							(spm_page_word_cnt != {SPM_PAGE_ADDR_WIDTH{1'b1}}))
+							state_cnt <= `STEP1;
 					// OUT stays STEP0 (1-cycle) except OUT_TARGETS_SREG, which always uses the
 					// 2-cycle STEP0->STEP1 path. A stalled OUT (blocked behind a pending
 					// retirement) also stays at STEP0 and simply re-latches next cycle.
