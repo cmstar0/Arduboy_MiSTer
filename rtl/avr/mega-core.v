@@ -156,7 +156,12 @@ module mega #(
 	parameter RAM_ADDR_WIDTH = 16,
 	parameter WATCHDOG_CNT_WIDTH = 0,
 	parameter VECTOR_INT_TABLE_SIZE = 0,
-	parameter REGS_REGISTERED = "FALSE"
+	parameter REGS_REGISTERED = "FALSE",
+	// SPM page-buffer word-address width (real per-chip page geometry, "PCWORD"/"PAGEMSB" in the
+	// datasheets -- ATmega32U4=6 [64 words/page], ATmega644=7 [128 words/page], independently
+	// confirmed from each chip's own datasheet). Every real consumer of this shared module must
+	// pass its own correct value explicitly -- there is no meaningful default across chips.
+	parameter SPM_PAGE_ADDR_WIDTH = 6
 	)(
 	input rst,
 	output sys_rst_out,
@@ -202,6 +207,17 @@ reg [7:0]SPMCSR;
 // Counts remaining cycles of SPMCSR's real 4-clock-cycle arming window (datasheet-documented:
 // an SPM instruction must execute within 4 cycles of writing SPMEN, or the armed bits auto-clear).
 reg [2:0]spm_arm_cnt;
+// SPM temporary page buffer -- one real word per PCWORD index, sized per chip via
+// SPM_PAGE_ADDR_WIDTH. Real hardware auto-erases this on a real Page Write or system reset; this
+// model does not (disclosed simplification -- no real bootloader relies on stale-buffer behavior
+// across a reset, since a correct bootloader always fills every word of the page explicitly
+// before erasing/writing).
+reg [15:0]spm_buffer[0:(2**SPM_PAGE_ADDR_WIDTH)-1];
+// Captures which SPM sub-operation (SPMCSR[4:0] at the moment SPM executes) was requested, since
+// the "Set SPMCSR" completion-clear (see that section) zeroes SPMCSR[4:0] the same cycle SPM
+// decodes -- by the time the buffer-fill/erase/write action itself runs (STEP1), SPMCSR has
+// already gone back to 0 and can no longer be read to tell which operation was meant.
+reg [4:0]spm_op_latched;
 reg [7:0]EIND;
 reg [7:0]RAMPZ;
 reg [7:0]RAMPY;
@@ -557,6 +573,7 @@ initial begin
 	holding_instr = 1'b0;
 	SPMCSR = 8'h00;
 	spm_arm_cnt = 3'h0;
+	spm_op_latched = 5'h00;
 end
 
 reg halt_ack_n;
@@ -778,6 +795,10 @@ begin
 					casex({execute, state_cnt, CORE_TYPE, pgm_data_registered})
 						{1'b1, `STEP0, `INSTRUCTION_SPM}:
 						begin
+							// Capture which sub-operation was requested before clearing SPMCSR --
+							// see spm_op_latched's own declaration comment for why this can't just
+							// be read back later from SPMCSR itself.
+							spm_op_latched <= SPMCSR[4:0];
 							SPMCSR[4:0] <= 5'h00;
 							spm_arm_cnt <= 3'h0;
 						end
@@ -814,6 +835,29 @@ begin
 						endcase
 					end
 				endcase
+	/* Set "spm_buffer" */ /*************************************************************/
+				// SPM Step 2: page-buffer fill only (plain SPMEN, no PGERS/PGWRT/BLBSET/RWWSRE/
+				// SIGRD set alongside it -- spm_op_latched == 5'b00001 exactly). Real hardware:
+				// "the content of PCWORD in the Z-register is used to address the data in the
+				// temporary buffer" -- PCWORD's real Z-range is Z[SPM_PAGE_ADDR_WIDTH:1] on both
+				// real chips (independently confirmed against each datasheet: Z6:Z1 for the
+				// ATmega32U4's 6-bit PCWORD, Z7:Z1 for the ATmega644's 7-bit PCWORD -- Z0 is
+				// always ignored, word-addressed). ijmp_z is used here (not the shared rs1a/reg_rs1
+				// path) because it's a same-cycle-safe combinational tap of Z's real current value,
+				// with no risk of the cross-module register-read lag this project has been burned
+				// by before -- reading it at STEP1 (rather than STEP0) is still correct since Z
+				// cannot change mid-instruction. reg_rs1, in contrast, is read via the ordinary
+				// rs1a-then-STEP1-consume path (set to r0/r1 at STEP0 above), the same proven
+				// timing shape ICALL already uses for its own Z operand -- not the same-cycle path,
+				// deliberately, since SPM's own opcode has no register field to trust for same-cycle
+				// use the way a normal ALU op's Rd/Rr fields do.
+				casex({execute, state_cnt, CORE_TYPE, pgm_data_registered})
+					{1'b1, `STEP1, `INSTRUCTION_SPM}:
+					begin
+						if(spm_op_latched == 5'b00001)
+							spm_buffer[ijmp_z[SPM_PAGE_ADDR_WIDTH:1]] <= reg_rs1;
+					end
+				endcase
 	/* Set "rs1a" */ /*************************************************************/
 				casex({execute, state_cnt, CORE_TYPE, pgm_data_registered})
 					{1'b1, `STEP0, `INSTRUCTION_MULS}: rs1a[4] <= 1'b1;
@@ -829,12 +873,17 @@ begin
 					{1'b1, `STEP0, `INSTRUCTION_ADIW},
 					{1'b1, `STEP0, `INSTRUCTION_SBIW}: rs1a <= {2'b11, pgm_data_registered[5:4], 1'b0};
 					{1'b1, `STEP0, `INSTRUCTION_ICALL}: rs1a <= 5'b11110;
+					// SPM's real source operand is the fixed register pair R1:R0 (datasheet: "the
+					// data in R1 and R0"), not an opcode-encoded field -- SPM's own opcode has no
+					// register bits at all. Read at STEP1, same timing shape as ICALL's own Z-read.
+					{1'b1, `STEP0, `INSTRUCTION_SPM}: rs1a <= 5'b00000;
 				endcase
 	/* Set "reg_rs1m" */ /*************************************************************/
 				casex({execute, state_cnt, CORE_TYPE, pgm_data_registered})
 					{1'b1, `STEP0, `INSTRUCTION_ADIW},
 					{1'b1, `STEP0, `INSTRUCTION_SBIW},
-					{1'b1, `STEP0, `INSTRUCTION_ICALL}: reg_rs1m <= `REG_MODE_16_BIT;
+					{1'b1, `STEP0, `INSTRUCTION_ICALL},
+					{1'b1, `STEP0, `INSTRUCTION_SPM}: reg_rs1m <= `REG_MODE_16_BIT;
 				endcase
 	/* Set "rs2a" */ /*************************************************************/
 				casex({execute, state_cnt, CORE_TYPE, pgm_data_registered})
@@ -1311,7 +1360,13 @@ begin
 					{1'b1, `STEP0, `INSTRUCTION_SBIC_SBIS},
 					{1'b1, `STEP0, `INSTRUCTION_LPM_R},
 					{1'b1, `STEP0, `INSTRUCTION_LPM_R_P},
-					{1'b1, `STEP0, `INSTRUCTION_LPM_ELPM}: state_cnt <= `STEP1;
+					{1'b1, `STEP0, `INSTRUCTION_LPM_ELPM},
+					// SPM: 2 cycles, same shape as ICALL's own Z-read (rs1a set at STEP0, safely
+					// propagated and consumed at STEP1 -- not a same-cycle read, avoiding the
+					// cross-module register-read lag this project has been burned by before). No
+					// datasheet-mandated cycle count exists for SPM itself (only the full physical
+					// flash-write time, which this project's Option B deliberately doesn't model).
+					{1'b1, `STEP0, `INSTRUCTION_SPM}: state_cnt <= `STEP1;
 					// OUT stays STEP0 (1-cycle) except OUT_TARGETS_SREG, which always uses the
 					// 2-cycle STEP0->STEP1 path. A stalled OUT (blocked behind a pending
 					// retirement) also stays at STEP0 and simply re-latches next cycle.
@@ -1460,7 +1515,13 @@ begin
 					{1'b1, `STEP0, `INSTRUCTION_LPM_R_P},
 					{1'b1, `STEP1, `INSTRUCTION_LPM_R_P},
 					{1'b1, `STEP0, `INSTRUCTION_LPM_ELPM},
-					{1'b1, `STEP1, `INSTRUCTION_LPM_ELPM}: PC <= PC;
+					{1'b1, `STEP1, `INSTRUCTION_LPM_ELPM},
+					// Missed on first pass: every multi-cycle instruction in this file freezes PC
+					// throughout its own execution (confirmed by reading this exact casex, not
+					// assumed) -- without this, PC keeps advancing during SPM's extra cycle and the
+					// fetch pipeline ends up one word ahead, corrupting whatever comes next.
+					{1'b1, `STEP0, `INSTRUCTION_SPM},
+					{1'b1, `STEP1, `INSTRUCTION_SPM}: PC <= PC;
 					// OUT freezes PC only for OUT_TARGETS_SREG's old path or while genuinely stalled
 					// (a retirement pending and the bus busy this cycle) -- otherwise 1-cycle throughput.
 					{1'b1, `STEP0, `INSTRUCTION_OUT}: if(`OUT_TARGETS_SREG | `OUT_TARGETS_SPMCSR | (out_retire_pending & bus_busy_this_cycle)) PC <= PC;

@@ -41,6 +41,9 @@
 
 `define VECTOR_INT_TABLE_SIZE   42
 `define WATCHDOG_CNT_WIDTH      0//27
+/* SPM page geometry -- ATmega32U4 datasheet Ch.28 Table 28-11: 64 words/page needs 6 bits
+ * (PC[5:0]) to address a word within one page ("PAGEMSB"). */
+`define SPM_PAGE_ADDR_WIDTH     6
 
 /* TIMMERS PRESCALLERS MODULE */
 module tim_013_prescaller (
@@ -960,7 +963,8 @@ mega # (
     .WATCHDOG_CNT_WIDTH(`WATCHDOG_CNT_WIDTH),/* If is 0 the watchdog is disabled */
     .VECTOR_INT_TABLE_SIZE(`VECTOR_INT_TABLE_SIZE),/* If is 0 the interrupt module is disabled */
     .USE_HALT(USE_HALT),
-    .REGS_REGISTERED(REGS_REGISTERED)
+    .REGS_REGISTERED(REGS_REGISTERED),
+    .SPM_PAGE_ADDR_WIDTH(`SPM_PAGE_ADDR_WIDTH)
     )atmega32u4_inst(
     .rst(rst),
     .sys_rst_out(wdt_rst),
