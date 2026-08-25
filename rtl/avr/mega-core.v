@@ -194,6 +194,14 @@ reg data_read_int;
 reg [1:0]state_cnt;
 reg [7:0]SREG;
 reg [RAM_ADDR_WIDTH - 1:0]SP;
+// SPM Control and Status Register (real chip name/address, both ATmega32U4 and ATmega644 --
+// independently confirmed identical bit layout on both: SPMIE(7) RWWSB(6) SIGRD(5) RWWSRE(4)
+// BLBSET(3) PGWRT(2) PGERS(1) SPMEN(0), I/O address 0x37. Page geometry differs per chip and is
+// not modeled by this register itself -- see the per-chip top-level file for that.
+reg [7:0]SPMCSR;
+// Counts remaining cycles of SPMCSR's real 4-clock-cycle arming window (datasheet-documented:
+// an SPM instruction must execute within 4 cycles of writing SPMEN, or the armed bits auto-clear).
+reg [2:0]spm_arm_cnt;
 reg [7:0]EIND;
 reg [7:0]RAMPZ;
 reg [7:0]RAMPY;
@@ -334,6 +342,9 @@ reg out_retire_fire;
 // implicitly by nearly the whole ISA (every ALU flag computation, every conditional branch via
 // sreg_out), so it isn't a narrow, enumerable hazard like the data bus.
 `define OUT_TARGETS_SREG ({pgm_data_registered[10:9],pgm_data_registered[3:0]} == 6'h3F)
+// SPMCSR (0x37), same reasoning as OUT_TARGETS_SREG: forced onto the safe 2-cycle path so its
+// real 4-clock-cycle arming window always counts from an unambiguous write cycle.
+`define OUT_TARGETS_SPMCSR ({pgm_data_registered[10:9],pgm_data_registered[3:0]} == 6'h37)
 
 int_encoder # (
 	.VECTOR_INT_TABLE_SIZE(VECTOR_INT_TABLE_SIZE)
@@ -454,6 +465,7 @@ begin
 		24'h05D: data_in_int = SP[7:0];
 		24'h05E: if(RAM_ADDR_WIDTH > 8) data_in_int = SP[RAM_ADDR_WIDTH - 1:8];
 		24'h05F: data_in_int = SREG;
+		24'h057: data_in_int = SPMCSR;
 	endcase
 /* Set "reg_rd" */ /*************************************************************/
 	casex({execute, state_cnt, CORE_TYPE, pgm_data_registered})
@@ -543,6 +555,8 @@ initial begin
 	out_rs1a = 5'h00;
 	held_instr = 16'h0000;
 	holding_instr = 1'b0;
+	SPMCSR = 8'h00;
+	spm_arm_cnt = 3'h0;
 end
 
 reg halt_ack_n;
@@ -567,6 +581,10 @@ begin
 		// a soft reset, since nothing in software can unstick a stuck retirement/hold otherwise.
 		out_retire_pending <= 1'b0;
 		holding_instr <= 1'b0;
+		// Same reasoning: a soft reset must not leave a stale SPM arming window live, since real
+		// hardware's own datasheet-documented Initial Value for SPMCSR is 0.
+		SPMCSR <= 8'h00;
+		spm_arm_cnt <= 3'h0;
 	end
 	else
 	begin
@@ -746,6 +764,56 @@ begin
 						end
 					endcase
 				end
+	/* Set "SPMCSR" */ /*************************************************************/
+				// ATmega32U4 datasheet Ch.27 SS27.5.4/27.8; ATmega644 datasheet SS24.8.1-24.9.1 --
+				// independently confirmed identical SPMCSR bit layout on both real chips (page
+				// geometry differs per chip and belongs in the per-chip top-level file, not here).
+				// Writing SPMEN (alone or paired with PGERS/PGWRT/BLBSET/RWWSRE/SIGRD) arms the
+				// *next* SPM instruction; it must execute within 4 clock cycles or the armed bits
+				// silently auto-clear. An SPM executing within the window clears them immediately
+				// instead (real completion, not a timeout). Step 1 of this project's SPM work: the
+				// register's own control-bit/timing behavior only -- no program-memory effect yet.
+				if(SPMCSR[0])
+				begin
+					casex({execute, state_cnt, CORE_TYPE, pgm_data_registered})
+						{1'b1, `STEP0, `INSTRUCTION_SPM}:
+						begin
+							SPMCSR[4:0] <= 5'h00;
+							spm_arm_cnt <= 3'h0;
+						end
+						default:
+						begin
+							if(spm_arm_cnt == 3'h0)
+								SPMCSR[4:0] <= 5'h00;
+							else
+								spm_arm_cnt <= spm_arm_cnt - 3'h1;
+						end
+					endcase
+				end
+				casex({execute, state_cnt, CORE_TYPE, pgm_data_registered})
+					{1'b1, `STEP1, `INSTRUCTION_STS}:
+					begin
+						case(ROM_ADDR_WIDTH > 16 ? {RAMPD, pgm_data_int} : pgm_data_int)
+							24'h057:
+							begin
+								SPMCSR <= reg_rs1;
+								if(reg_rs1[0]) spm_arm_cnt <= 3'd4;
+							end
+						endcase
+					end
+					{1'b1, `STEP1, `INSTRUCTION_OUT}:
+					begin
+						// OUT_TARGETS_SPMCSR path only -- see that macro's own comment for why this
+						// is always the safe 2-cycle path, mirroring OUT_TARGETS_SREG.
+						case({pgm_data_registered[10:9],pgm_data_registered[3:0]})
+							6'h37:
+							begin
+								SPMCSR <= reg_rs1;
+								if(reg_rs1[0]) spm_arm_cnt <= 3'd4;
+							end
+						endcase
+					end
+				endcase
 	/* Set "rs1a" */ /*************************************************************/
 				casex({execute, state_cnt, CORE_TYPE, pgm_data_registered})
 					{1'b1, `STEP0, `INSTRUCTION_MULS}: rs1a[4] <= 1'b1;
@@ -1247,7 +1315,7 @@ begin
 					// OUT stays STEP0 (1-cycle) except OUT_TARGETS_SREG, which always uses the
 					// 2-cycle STEP0->STEP1 path. A stalled OUT (blocked behind a pending
 					// retirement) also stays at STEP0 and simply re-latches next cycle.
-					{1'b1, `STEP0, `INSTRUCTION_OUT}: if(`OUT_TARGETS_SREG) state_cnt <= `STEP1;
+					{1'b1, `STEP0, `INSTRUCTION_OUT}: if(`OUT_TARGETS_SREG | `OUT_TARGETS_SPMCSR) state_cnt <= `STEP1;
 	/*************************************************************/
 					{1'b1, `STEP1, `INSTRUCTION_CALL},
 					{1'b1, `STEP1, `INSTRUCTION_RET},
@@ -1316,7 +1384,7 @@ begin
 				casex({execute, state_cnt, CORE_TYPE, pgm_data_registered})
 					{1'b1, `STEP0, `INSTRUCTION_OUT}:
 					begin
-						if(~`OUT_TARGETS_SREG & ~(out_retire_pending & bus_busy_this_cycle))
+						if(~`OUT_TARGETS_SREG & ~`OUT_TARGETS_SPMCSR & ~(out_retire_pending & bus_busy_this_cycle))
 						begin
 							out_retire_pending <= 1'b1;
 							out_retire_instr <= pgm_data_registered;
@@ -1395,7 +1463,7 @@ begin
 					{1'b1, `STEP1, `INSTRUCTION_LPM_ELPM}: PC <= PC;
 					// OUT freezes PC only for OUT_TARGETS_SREG's old path or while genuinely stalled
 					// (a retirement pending and the bus busy this cycle) -- otherwise 1-cycle throughput.
-					{1'b1, `STEP0, `INSTRUCTION_OUT}: if(`OUT_TARGETS_SREG | (out_retire_pending & bus_busy_this_cycle)) PC <= PC;
+					{1'b1, `STEP0, `INSTRUCTION_OUT}: if(`OUT_TARGETS_SREG | `OUT_TARGETS_SPMCSR | (out_retire_pending & bus_busy_this_cycle)) PC <= PC;
 				endcase
 			end
 		end
