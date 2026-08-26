@@ -102,7 +102,16 @@
 `define INSTRUCTION_SEx_CLx			{`MEGA_REDUCED_INT, 		16'b10010100xxxx1000}//10010100Bbbb1000	*
 `define INSTRUCTION_RET				{`MEGA_CLUSTER_INT, 		16'b1001010100001000}//1001010100001000	*
 `define INSTRUCTION_RETI			{`MEGA_REDUCED_INT, 		16'b1001010100011000}//1001010100011000	*
-`define INSTRUCTION_SLEEP			{`MEGA_REDUCED_INT, 		16'b1001010110000000}//1001010100001000	
+// Decode bug, found in the 2026-08-25 ground-up instruction audit, fixed here: RTL previously
+// decoded 16'b1001010110000000 (0x9580), differing at bit 3 from the real encoding
+// (1001 0101 1000 1000 / 0x9588, AVR ISA Manual SS6.111, Table 6-111 confirms AVRe=1 cycle).
+// The trailing comment below was also a stale copy-paste of RET's own bit pattern two lines up
+// (the same class of error Round 32 already found and fixed on RETI's comment) -- corrected to
+// SLEEP's own real encoding. Zero behavioral effect either way: INSTRUCTION_SLEEP is never
+// referenced anywhere in mega-core.v/mega-alu.v outside this definition (confirmed by grep,
+// zero matches) -- no sleep/power-down behavior is wired up, so a real SLEEP opcode already
+// silently falls through to a no-op regardless of whether the decode pattern matches.
+`define INSTRUCTION_SLEEP			{`MEGA_REDUCED_INT, 		16'b1001010110001000}//1001010110001000
 `define INSTRUCTION_BREAK			{`MEGA_ENHANCED_128K_INT, 	16'b1001010110011000}//1001010100011000	
 `define INSTRUCTION_WDR				{`MEGA_REDUCED_INT, 		16'b1001010110101000}//1001010100101000	*
 `define INSTRUCTION_LPM_ELPM		{`MEGA_MINIMAL_INT, 		16'b10010101110x1000}//10010101110q1000	*
