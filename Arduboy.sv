@@ -154,22 +154,25 @@ wire [13:0] spm_pgm_addr;
 wire [15:0] spm_pgm_data;
 wire        spm_pgm_write;
 
-// SPM Page Erase/Write share this same clk_avr port with the normal instruction read rather than
+// SPM Page Erase/Write shares this same clk_avr port with the normal instruction read rather than
 // adding a genuine third port -- Cyclone V M10K natively supports 2 ports (this one, plus the
-// clk_sys loader port below), not 3. Safe because PC is frozen for the CPU's entire duration of
-// a Page Erase/Write (see mega-core.v's own PC<=PC entry for INSTRUCTION_SPM): pgm_data holding
-// its previous value on a write cycle is never observed, since mega-core.v only ever latches a
-// fresh pgm_data into the instruction it's decoding when state_cnt==STEP0, which never happens
-// until the whole SPM operation completes and normal fetching resumes on its own next cycle.
-// Read and write MUST be two independent always blocks, not combined into one (even with an
-// unconditional read) -- a first attempt kept the read unconditional inside the SAME always block
-// as the conditional write, and Quartus still rejected it: "RAM logic 'rom' is uninferred due to
-// unsupported read-during-write behavior" (Error 276003, confirmed via two separate real compile
-// attempts, each run to completion, not assumed). Splitting into two separate always blocks --
-// the same shape the read already had before this port existed, and the same shape the clk_sys
-// loader write below already uses -- is Quartus's actual recognized simple-dual-port template.
-always @ (posedge clk_avr) pgm_data <= rom[pgm_addr];
-always @ (posedge clk_avr) if (spm_pgm_write) rom[spm_pgm_addr] <= spm_pgm_data;
+// clk_sys loader port below), not 3. Two independent address buses (pgm_addr for the read,
+// spm_pgm_addr for the write) on this one clock was tried three ways -- combined always block,
+// unconditional read plus independent conditional write, and split into two separate always
+// blocks -- and all three failed the same real Quartus compile: "RAM logic 'rom' is uninferred
+// due to unsupported read-during-write behavior" (276003/276009). Two different addresses feeding
+// the same clock forces a true 2-port shape for this port alone, which combined with the clk_sys
+// write below exceeds M10K's 2-port limit. Fix: mux both addresses onto one bus instead, so this
+// port only ever has one address per cycle, same shape mega_ram.v (rtl/avr/mega-ram.v) already
+// compiles cleanly with. Safe because pgm_addr defaults to PC (mega-core.v:567) and PC is frozen
+// (PC<=PC) for the CPU's entire duration of a Page Erase/Write (mega-core.v's STEP0/STEP1
+// INSTRUCTION_SPM entries) -- so reading at spm_pgm_addr instead of pgm_addr on a write cycle
+// produces a pgm_data value nothing ever consumes: state_cnt never returns to STEP0 to latch a
+// fresh instruction until the whole SPM operation completes and normal fetching resumes on its
+// own next cycle, at which point pgm_addr (== PC, unchanged) is read again correctly.
+wire [13:0] rom_addr_avr = spm_pgm_write ? spm_pgm_addr : pgm_addr;
+always @ (posedge clk_avr) pgm_data <= rom[rom_addr_avr];
+always @ (posedge clk_avr) if (spm_pgm_write) rom[rom_addr_avr] <= spm_pgm_data;
 
 wire [3:0] digit = (ioctl_dout[7:4] != 3) ? (ioctl_dout[3:0] + 4'd9) : ioctl_dout[3:0];
 always @ (posedge clk_sys) begin
