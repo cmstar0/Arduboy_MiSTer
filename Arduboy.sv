@@ -161,16 +161,15 @@ wire        spm_pgm_write;
 // its previous value on a write cycle is never observed, since mega-core.v only ever latches a
 // fresh pgm_data into the instruction it's decoding when state_cnt==STEP0, which never happens
 // until the whole SPM operation completes and normal fetching resumes on its own next cycle.
-// The read stays UNCONDITIONAL every cycle (not gated behind ~spm_pgm_write) -- making it
-// conditional broke Quartus's block-RAM inference for this 16384x16 array entirely (it tried to
-// implement all 262,144 bits as discrete registers instead, exceeding the device's register
-// count and failing synthesis outright after hours of futile optimization, confirmed via a real
-// compile attempt). One read port + one independently-conditional write port, both on clk_avr, is
-// the standard, tool-recognized simple-dual-port template.
-always @ (posedge clk_avr) begin
-    pgm_data <= rom[pgm_addr];
-    if (spm_pgm_write) rom[spm_pgm_addr] <= spm_pgm_data;
-end
+// Read and write MUST be two independent always blocks, not combined into one (even with an
+// unconditional read) -- a first attempt kept the read unconditional inside the SAME always block
+// as the conditional write, and Quartus still rejected it: "RAM logic 'rom' is uninferred due to
+// unsupported read-during-write behavior" (Error 276003, confirmed via two separate real compile
+// attempts, each run to completion, not assumed). Splitting into two separate always blocks --
+// the same shape the read already had before this port existed, and the same shape the clk_sys
+// loader write below already uses -- is Quartus's actual recognized simple-dual-port template.
+always @ (posedge clk_avr) pgm_data <= rom[pgm_addr];
+always @ (posedge clk_avr) if (spm_pgm_write) rom[spm_pgm_addr] <= spm_pgm_data;
 
 wire [3:0] digit = (ioctl_dout[7:4] != 3) ? (ioctl_dout[3:0] + 4'd9) : ioctl_dout[3:0];
 always @ (posedge clk_sys) begin
