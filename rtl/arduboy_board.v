@@ -17,6 +17,7 @@ module arduboy_board
     output [13:0] spm_pgm_addr,
     output [15:0] spm_pgm_data,
     output spm_pgm_write,
+    input spm_pgm_write_ack,
     input [5:0] buttons,
     input [7:0] joystick_analog,
     input status,
@@ -38,6 +39,7 @@ atmega32u4 atmega32u4
     .spm_pgm_addr(spm_pgm_addr),
     .spm_pgm_data(spm_pgm_data),
     .spm_pgm_write(spm_pgm_write),
+    .spm_pgm_write_ack(spm_pgm_write_ack),
     .joystick_analog(joystick_analog),
     .status(status),
 

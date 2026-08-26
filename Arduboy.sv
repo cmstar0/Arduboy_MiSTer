@@ -153,23 +153,21 @@ reg  [15:0] pgm_data;
 wire [13:0] spm_pgm_addr;
 wire [15:0] spm_pgm_data;
 wire        spm_pgm_write;
+wire        spm_pgm_write_ack;
 
-// SPM Page Erase/Write share this same clk_avr port with the normal instruction read rather than
-// adding a genuine third port -- Cyclone V M10K natively supports 2 ports (this one, plus the
-// clk_sys loader port below), not 3. Safe because PC is frozen for the CPU's entire duration of
-// a Page Erase/Write (see mega-core.v's own PC<=PC entry for INSTRUCTION_SPM): pgm_data holding
-// its previous value on a write cycle is never observed, since mega-core.v only ever latches a
-// fresh pgm_data into the instruction it's decoding when state_cnt==STEP0, which never happens
-// until the whole SPM operation completes and normal fetching resumes on its own next cycle.
-// Read and write MUST be two independent always blocks, not combined into one (even with an
-// unconditional read) -- a first attempt kept the read unconditional inside the SAME always block
-// as the conditional write, and Quartus still rejected it: "RAM logic 'rom' is uninferred due to
-// unsupported read-during-write behavior" (Error 276003, confirmed via two separate real compile
-// attempts, each run to completion, not assumed). Splitting into two separate always blocks --
-// the same shape the read already had before this port existed, and the same shape the clk_sys
-// loader write below already uses -- is Quartus's actual recognized simple-dual-port template.
+// SPM Page Erase/Write's write crosses from clk_avr into this clk_sys write port via
+// spm_write_cdc (instantiated below, alongside arduboy_board) instead of adding a second write
+// path on clk_avr -- four attempts at a same-clock second write path (combined always block,
+// unconditional read + independent write, split always blocks, and a muxed single address bus)
+// all failed the same real Quartus compile: "RAM logic 'rom' is uninferred due to unsupported
+// read-during-write behavior" (276003/276009). rom[] keeps the exact two-port shape it always
+// had: read on clk_avr, write on clk_sys. Full history: mega-regfile-timing-fix/PROJECT.md,
+// "Attempt 1-4".
 always @ (posedge clk_avr) pgm_data <= rom[pgm_addr];
-always @ (posedge clk_avr) if (spm_pgm_write) rom[spm_pgm_addr] <= spm_pgm_data;
+
+wire        spm_cdc_wr_write;
+wire [13:0] spm_cdc_wr_addr;
+wire [15:0] spm_cdc_wr_data;
 
 wire [3:0] digit = (ioctl_dout[7:4] != 3) ? (ioctl_dout[3:0] + 4'd9) : ioctl_dout[3:0];
 always @ (posedge clk_sys) begin
@@ -177,6 +175,11 @@ always @ (posedge clk_sys) begin
     reg  [7:0] cnt;
     reg [15:0] addr;
     reg  [3:0] code;
+
+    // SPM's write, crossed from clk_avr -- never overlaps the loader's own writes below in
+    // real operation (loader writes only happen during cart_download, before the CPU has even
+    // started running; SPM writes only happen mid-game).
+    if (spm_cdc_wr_write) rom[spm_cdc_wr_addr] <= spm_cdc_wr_data;
 
     if (ioctl_wr && cart_download) begin
         if(!ioctl_index) rom[ioctl_addr[14:1]][ioctl_addr[0]] <= ioctl_dout;
@@ -219,6 +222,7 @@ arduboy_board arduboy_board
     .spm_pgm_addr(spm_pgm_addr),
     .spm_pgm_data(spm_pgm_data),
     .spm_pgm_write(spm_pgm_write),
+    .spm_pgm_write_ack(spm_pgm_write_ack),
     .buttons(~(status[1] ? {joystick[5:4], joystick[1], joystick[0], joystick[2], joystick[3]} : joystick[5:0])),
     .joystick_analog(status[16] ? {~paddle[7],paddle[6:0]} : joystick_analog[7:0]),
     .status(|status[16:15]),
@@ -230,6 +234,20 @@ arduboy_board arduboy_board
     .spi_mosi(oled_data),
     .uart_rx(USER_IN[0]),
     .uart_tx(USER_OUT[1])
+);
+
+spm_write_cdc #(.ADDR_WIDTH(14), .DATA_WIDTH(16)) spm_write_cdc
+(
+    .clk_avr(clk_avr),
+    .req_write(spm_pgm_write),
+    .req_addr(spm_pgm_addr),
+    .req_data(spm_pgm_data),
+    .req_ack(spm_pgm_write_ack),
+
+    .clk_sys(clk_sys),
+    .wr_write(spm_cdc_wr_write),
+    .wr_addr(spm_cdc_wr_addr),
+    .wr_data(spm_cdc_wr_data)
 );
 
 wire pixelValue, ce_pix;

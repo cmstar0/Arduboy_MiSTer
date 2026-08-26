@@ -106,6 +106,9 @@ module atmega32u4 # (
     output [`ROM_ADDR_WIDTH-1:0] spm_pgm_addr,
     output [15:0] spm_pgm_data,
     output spm_pgm_write,
+    // Pulses once (clk domain) when the board-level file confirms the requested word actually
+    // landed -- see mega-core.v's own spm_pgm_write_ack port for why this is needed.
+    input spm_pgm_write_ack,
     input [7:0] joystick_analog,
     input status,
     input PF4, PF5, PF6, PF7, PE6, PB4,
@@ -988,6 +991,7 @@ mega # (
     .spm_pgm_addr(spm_pgm_addr),
     .spm_pgm_data(spm_pgm_data),
     .spm_pgm_write(spm_pgm_write),
+    .spm_pgm_write_ack(spm_pgm_write_ack),
     // RAM space data interface.
     .data_addr(data_addr),
     .data_out(core_data_out),

@@ -189,6 +189,16 @@ module mega #(
 	output reg [ROM_ADDR_WIDTH - 1:0]spm_pgm_addr,
 	output reg [15:0]spm_pgm_data,
 	output reg spm_pgm_write,
+	// Pulses once (in this clk domain) when the top-level file confirms the word requested via
+	// spm_pgm_write/addr/data has actually landed in program memory. Required because the real
+	// ROM array's write port lives in a different clock domain on Arduboy_MiSTer (clk_sys, not
+	// this module's clk) -- see Arduboy.sv's spm_write_cdc instance. Gates spm_page_word_cnt so
+	// this module issues one word at a time and waits for confirmation, instead of free-running
+	// one word per cycle the way it did before this port existed (that shape required a second,
+	// same-cycle write path on this module's own clock, which Quartus's RAM inference for the
+	// real ROM array rejected three separate ways -- see mega-regfile-timing-fix/PROJECT.md's
+	// "Attempt 1-4" history).
+	input spm_pgm_write_ack,
 	input [(VECTOR_INT_TABLE_SIZE == 0 ? 0 : VECTOR_INT_TABLE_SIZE - 1):0]int_sig,
 	output reg [(VECTOR_INT_TABLE_SIZE == 0 ? 0 : VECTOR_INT_TABLE_SIZE - 1):0]int_rst
     );
@@ -230,6 +240,11 @@ reg [4:0]spm_op_latched;
 // SPM_PAGE_ADDR_WIDTH-1 (every real page word), one per clock cycle. Not used for a plain
 // buffer-fill SPM.
 reg [SPM_PAGE_ADDR_WIDTH-1:0]spm_page_word_cnt;
+// Set the same cycle a word's spm_pgm_write is issued, cleared the cycle spm_pgm_write_ack
+// arrives for it -- blocks a new spm_pgm_write/spm_page_word_cnt advance from happening until
+// the previous word's write is confirmed applied. Not used by the plain buffer-fill SPM
+// (SPMEN alone), which has no real program-memory effect and stays a single STEP1 cycle.
+reg spm_word_pending;
 reg [7:0]EIND;
 reg [7:0]RAMPZ;
 reg [7:0]RAMPY;
@@ -590,6 +605,7 @@ initial begin
 	spm_pgm_addr = 0;
 	spm_pgm_data = 16'h0000;
 	spm_pgm_write = 1'b0;
+	spm_word_pending = 1'b0;
 end
 
 reg halt_ack_n;
@@ -618,6 +634,9 @@ begin
 		// hardware's own datasheet-documented Initial Value for SPMCSR is 0.
 		SPMCSR <= 8'h00;
 		spm_arm_cnt <= 3'h0;
+		// A soft reset mid-CDC-round-trip must not leave the CPU permanently stalled waiting for
+		// an ack that a reset top-level module will never send for the old request.
+		spm_word_pending <= 1'b0;
 	end
 	else
 	begin
@@ -892,30 +911,43 @@ begin
 						case(spm_op_latched)
 							5'b00001: // plain SPMEN: page-buffer fill (Step 2)
 								spm_buffer[ijmp_z[SPM_PAGE_ADDR_WIDTH:1]] <= reg_rs1;
+							// SPMEN+PGERS/PGWRT: issue this word's write only if the previous word's
+							// spm_pgm_write_ack has already come back (spm_word_pending==0) -- one
+							// word in flight at a time, since spm_pgm_write/addr/data cross into a
+							// different clock domain in the real top-level file and must not be
+							// overwritten with the next word before that crossing has consumed them.
 							5'b00011: // SPMEN+PGERS: Page Erase -- real flash page, all words 0xFFFF
+							if(!spm_word_pending)
 							begin
 								spm_pgm_addr <= {ijmp_z[ROM_ADDR_WIDTH:SPM_PAGE_ADDR_WIDTH+1], spm_page_word_cnt};
 								spm_pgm_data <= 16'hFFFF;
 								spm_pgm_write <= 1'b1;
+								spm_word_pending <= 1'b1;
 							end
 							5'b00101: // SPMEN+PGWRT: Page Write -- commit buffer to real flash page
+							if(!spm_word_pending)
 							begin
 								spm_pgm_addr <= {ijmp_z[ROM_ADDR_WIDTH:SPM_PAGE_ADDR_WIDTH+1], spm_page_word_cnt};
 								spm_pgm_data <= spm_buffer[spm_page_word_cnt];
 								spm_pgm_write <= 1'b1;
 								spm_buffer[spm_page_word_cnt] <= 16'hFFFF;
+								spm_word_pending <= 1'b1;
 							end
 						endcase
 					end
 				endcase
 	/* Set "spm_page_word_cnt" */ /*************************************************************/
-				// Advances once per cycle while Page Erase/Write is still walking the page;
-				// irrelevant (never incremented) for a plain buffer-fill SPM.
+				// Advances (and clears spm_word_pending) only once spm_pgm_write_ack confirms the
+				// current word actually landed -- not once per cycle. Irrelevant (never
+				// incremented) for a plain buffer-fill SPM.
 				casex({execute, state_cnt, CORE_TYPE, pgm_data_registered})
 					{1'b1, `STEP1, `INSTRUCTION_SPM}:
 					begin
-						if(spm_op_latched == 5'b00011 || spm_op_latched == 5'b00101)
+						if((spm_op_latched == 5'b00011 || spm_op_latched == 5'b00101) && spm_pgm_write_ack)
+						begin
 							spm_page_word_cnt <= spm_page_word_cnt + 1'b1;
+							spm_word_pending <= 1'b0;
+						end
 					end
 				endcase
 	/* Set "rs1a" */ /*************************************************************/
@@ -1427,14 +1459,25 @@ begin
 					// datasheet-mandated cycle count exists for SPM itself (only the full physical
 					// flash-write time, which this project's Option B deliberately doesn't model).
 					{1'b1, `STEP0, `INSTRUCTION_SPM}: state_cnt <= `STEP1;
-					// Page Erase/Write (Step 3) repeat at STEP1 -- one real page word per cycle --
-					// until spm_page_word_cnt has walked every word (all-1s = the last one). A
-					// plain buffer-fill (spm_op_latched==5'b00001) never matches this condition, so
-					// it correctly falls through to the earlier-scheduled STEP0 default after its
-					// single STEP1 cycle, same as before this step.
+					// Page Erase/Write (Step 3) repeat at STEP1 until the LAST word's own
+					// spm_pgm_write_ack has actually arrived -- NOT simply until
+					// spm_page_word_cnt currently reads all-1s. Those two are different moments:
+					// spm_page_word_cnt reaches all-1s (via the previous word's ack) on the very
+					// same cycle the last word's own write is newly issued (spm_word_pending
+					// above still reads 0 at that instant, since it hasn't been set for the new
+					// request yet) -- exiting on "cnt==all-1s" alone would leave STEP1 one full
+					// ack round trip before the last word's write is even applied, silently
+					// dropping it (caught by tb_spm_page_erase_write.v's Page Write checks
+					// failing outright when this was first tried). Checking for the specific
+					// ack-arrival event for the all-1s word instead means this only fires the
+					// same cycle the counter/pending-clear block below wraps the counter back to
+					// 0, exactly when the walk has genuinely finished. A plain buffer-fill
+					// (spm_op_latched==5'b00001) never matches this condition, so it correctly
+					// falls through to the earlier-scheduled STEP0 default after its single STEP1
+					// cycle, same as before this step.
 					{1'b1, `STEP1, `INSTRUCTION_SPM}:
 						if((spm_op_latched == 5'b00011 || spm_op_latched == 5'b00101) &
-							(spm_page_word_cnt != {SPM_PAGE_ADDR_WIDTH{1'b1}}))
+							~(spm_pgm_write_ack & (spm_page_word_cnt == {SPM_PAGE_ADDR_WIDTH{1'b1}})))
 							state_cnt <= `STEP1;
 					// OUT stays STEP0 (1-cycle) except OUT_TARGETS_SREG, which always uses the
 					// 2-cycle STEP0->STEP1 path. A stalled OUT (blocked behind a pending
