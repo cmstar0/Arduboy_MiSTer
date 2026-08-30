@@ -1,0 +1,93 @@
+// Program ROM for the Arduboy core: 16384 x 16-bit, explicitly instantiated rather than inferred.
+//
+// The CPU side (port A, clk_avr) is a 16-bit word port; the loader side (port B, clk_sys) is an
+// 8-bit byte port, which is how the .hex/.bin loader and the Intel-HEX parser both write. Mixed
+// port widths are an altsyncram feature, so the byte/word split costs nothing here.
+//
+// Why explicit: adding a second write-capable access to this array as an inferred `reg` array --
+// which SPM (flash self-programming) needs -- made Quartus give up on RAM inference across five
+// different RTL shapes, falling back to logic elements for a 256 Kbit memory and turning a 12-minute
+// build into a multi-hour one. An explicit megafunction states the port shape instead of hoping
+// inference recognises it. Same in-tree pattern other MiSTer cores use (dpram.v in
+// Super_Vision_8000_MiSTer, ZX-Spectrum_MISTer, NES_MiSTer, Gameboy_MiSTer).
+//
+// wren_a is tied off by the caller until SPM lands; the port exists so that adding it is a wire,
+// not another inference experiment.
+
+module arduboy_rom #(parameter MEM_INIT_FILE = "")
+(
+	// CPU side: 16-bit words
+	input             clk_avr,
+	input      [13:0] addr_a,
+	input      [15:0] data_a,
+	input             wren_a,
+	output     [15:0] q_a,
+
+	// Loader side: 8-bit bytes
+	input             clk_sys,
+	input      [14:0] addr_b,
+	input      [7:0]  data_b,
+	input             wren_b
+);
+
+altsyncram	altsyncram_component (
+			.clock0 (clk_avr),
+			.address_a (addr_a),
+			.data_a (data_a),
+			.wren_a (wren_a),
+			.q_a (q_a),
+
+			.clock1 (clk_sys),
+			.address_b (addr_b),
+			.data_b (data_b),
+			.wren_b (wren_b),
+			.q_b (),
+
+			.aclr0 (1'b0),
+			.aclr1 (1'b0),
+			.addressstall_a (1'b0),
+			.addressstall_b (1'b0),
+			.byteena_a (1'b1),
+			.byteena_b (1'b1),
+			.clocken0 (1'b1),
+			.clocken1 (1'b1),
+			.clocken2 (1'b1),
+			.clocken3 (1'b1),
+			.eccstatus (),
+			.rden_a (1'b1),
+			.rden_b (1'b0));
+defparam
+	altsyncram_component.operation_mode = "BIDIR_DUAL_PORT",
+	altsyncram_component.intended_device_family = "Cyclone V",
+	altsyncram_component.lpm_type = "altsyncram",
+	altsyncram_component.init_file = MEM_INIT_FILE,
+
+	altsyncram_component.width_a = 16,
+	altsyncram_component.widthad_a = 14,
+	altsyncram_component.numwords_a = 16384,
+	altsyncram_component.width_byteena_a = 1,
+	altsyncram_component.outdata_reg_a = "UNREGISTERED",
+	altsyncram_component.outdata_aclr_a = "NONE",
+	altsyncram_component.read_during_write_mode_port_a = "NEW_DATA_NO_NBE_READ",
+
+	altsyncram_component.width_b = 8,
+	altsyncram_component.widthad_b = 15,
+	altsyncram_component.numwords_b = 32768,
+	altsyncram_component.width_byteena_b = 1,
+	altsyncram_component.outdata_reg_b = "UNREGISTERED",
+	altsyncram_component.outdata_aclr_b = "NONE",
+	altsyncram_component.address_reg_b = "CLOCK1",
+	altsyncram_component.indata_reg_b = "CLOCK1",
+	altsyncram_component.wrcontrol_wraddress_reg_b = "CLOCK1",
+	altsyncram_component.read_during_write_mode_port_b = "NEW_DATA_NO_NBE_READ",
+
+	// Two independent clocks, so a simultaneous access to the same address has no defined
+	// ordering -- which is correct here: the loader only writes while the CPU is held in reset.
+	altsyncram_component.read_during_write_mode_mixed_ports = "DONT_CARE",
+	altsyncram_component.power_up_uninitialized = "FALSE",
+	altsyncram_component.clock_enable_input_a = "BYPASS",
+	altsyncram_component.clock_enable_input_b = "BYPASS",
+	altsyncram_component.clock_enable_output_a = "BYPASS",
+	altsyncram_component.clock_enable_output_b = "BYPASS";
+
+endmodule

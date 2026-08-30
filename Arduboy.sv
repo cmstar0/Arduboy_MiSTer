@@ -149,12 +149,27 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
     .ioctl_dout(ioctl_dout)
 );
 
-(* ram_init_file = "rtl/Arduventure.mif" *)
-reg  [1:0][7:0] rom[16384];
 wire [13:0] pgm_addr;
-reg  [15:0] pgm_data;
+wire [15:0] pgm_data;
 
-always @ (posedge clk_avr) pgm_data <= rom[pgm_addr];
+// Loader writes, muxed onto the ROM's byte-wide port B. Both writers below drive these.
+reg  [14:0] rom_wraddr;
+reg   [7:0] rom_wrdata;
+reg         rom_wr;
+
+arduboy_rom #(.MEM_INIT_FILE("rtl/Arduventure.mif")) rom
+(
+	.clk_avr(clk_avr),
+	.addr_a(pgm_addr),
+	.data_a(16'h0000),
+	.wren_a(1'b0),
+	.q_a(pgm_data),
+
+	.clk_sys(clk_sys),
+	.addr_b(rom_wraddr),
+	.data_b(rom_wrdata),
+	.wren_b(rom_wr)
+);
 
 wire [3:0] digit = (ioctl_dout[7:4] != 3) ? (ioctl_dout[3:0] + 4'd9) : ioctl_dout[3:0];
 always @ (posedge clk_sys) begin
@@ -163,8 +178,14 @@ always @ (posedge clk_sys) begin
     reg [15:0] addr;
     reg  [3:0] code;
 
+    rom_wr <= 0;
+
     if (ioctl_wr && cart_download) begin
-        if(!ioctl_index) rom[ioctl_addr[14:1]][ioctl_addr[0]] <= ioctl_dout;
+        if(!ioctl_index) begin
+            rom_wraddr <= ioctl_addr[14:0];
+            rom_wrdata <= ioctl_dout;
+            rom_wr     <= 1;
+        end
         else begin
             if(state) state <= state + 1'd1;
             case(state)
@@ -179,7 +200,9 @@ always @ (posedge clk_sys) begin
                  8: if({code,digit}) state <= 0;
                  9: code        <= digit;
                 10: begin
-                        rom[addr[14:1]][addr[0]] <= {code,digit};
+                        rom_wraddr <= addr[14:0];
+                        rom_wrdata <= {code,digit};
+                        rom_wr     <= 1;
                         addr <= addr + 1'd1;
                         cnt <= cnt - 1'd1;
                         state <= state - 1'd1;
