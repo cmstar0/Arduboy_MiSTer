@@ -21,11 +21,14 @@
 `timescale 1ns / 1ps
 
 //`define TIFR0 ('h00)
-`define TOV0 0
-`define OCF0A 1
-`define OCF0B 2
+// TIFR4 bit positions (15.12.13), not TIFR0's -- this module is the 32U4's Timer4.
+// TIMSK below was already remapped; the flag register was not, so mask and flag
+// disagreed and a poll of TOV4 read bit 0. Bits 3:0 are reserved on TIFR4.
+`define TOV0 2
+`define OCF0A 6
+`define OCF0B 5
 `define OCF0C 3
-`define OCF0D 4
+`define OCF0D 7
 
 //`define GTCCR ('h00)
 `define PSRSYNC 0
