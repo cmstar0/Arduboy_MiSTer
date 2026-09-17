@@ -285,11 +285,11 @@ begin
         TCH <= 2'h0;
         OCRA <= 10'h000;
         OCRB <= 10'h000;
-        OCRC <= 10'h000;
+        OCRC <= 10'h0FF;
         OCRD <= 10'h000;
         OCRA_int <= 10'h000;
         OCRB_int <= 10'h000;
-        OCRC_int <= 10'h000;
+        OCRC_int <= 10'h0FF;
         OCRD_int <= 10'h000;
         TIMSK <= 8'h00;
         TIFR <= 8'h00;
