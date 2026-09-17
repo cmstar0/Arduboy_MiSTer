@@ -548,7 +548,8 @@ begin
                         if(USE_OCRB == "TRUE")
                             OCRB <= {TMP_REG, bus_dat_in};
                     end
-                    OCRC_ADDR: OCRC <= {TMP_REG, bus_dat_in};
+                    // 15.12.10: a value below three written to OCR4C is replaced by three.
+                    OCRC_ADDR: OCRC <= ({TMP_REG, bus_dat_in} < 10'd3) ? 10'd3 : {TMP_REG, bus_dat_in};
                     OCRD_ADDR:
                     begin
                         if(USE_OCRD == "TRUE")
