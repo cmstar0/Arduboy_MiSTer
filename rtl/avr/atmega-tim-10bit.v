@@ -551,7 +551,12 @@ begin
         if({clk_sys_del, clk} == 2'b01 | ~pll_enabled)
         begin
             if(wr_dat & addr_dat == TIFR_ADDR)
-                TIFR <= TIFR & ~bus_dat_in;
+            begin
+                if(bus_dat_in[`TOV0])  TIFR[`TOV0]  <= 1'b0;
+                if(bus_dat_in[`OCF0A]) TIFR[`OCF0A] <= 1'b0;
+                if(bus_dat_in[`OCF0B]) TIFR[`OCF0B] <= 1'b0;
+                if(bus_dat_in[`OCF0D]) TIFR[`OCF0D] <= 1'b0;
+            end
             if(wr_dat)
             begin
                 case(addr_dat)
