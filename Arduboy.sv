@@ -86,7 +86,7 @@ end
 // 0         1         2         3          4         5         6
 // 01234567890123456789012345678901 23456789012345678901234567890123
 // 0123456789ABCDEFGHIJKLMNOPQRSTUV 0123456789ABCDEFGHIJKLMNOPQRSTUV
-// XXXXXXX XX     XX
+// XXXXXXXXXX     XX
 
 `include "build_id.v"
 localparam CONF_STR =
@@ -97,6 +97,7 @@ localparam CONF_STR =
     "O1,Orientation,Horizontal,Vertical;",
     "O89,Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
     "O35,Scandoubler Fx,None,HQ2x,CRT 25%,CRT 50%,CRT 75%;",
+    "O7,Greyscale,Off,On;",
     "OFG,ADC,Random,AnalogStick,Paddle;",
     "-;",
     "O2,Custom Palette,Off,On;",
@@ -255,6 +256,7 @@ arduboy_board arduboy_board
 );
 
 wire pixelValue, ce_pix;
+wire [2:0] pixelLevel;
 wire VSync, HSync, HBlank, VBlank;
 
 vgaHdmi vgaHdmi
@@ -265,11 +267,13 @@ vgaHdmi vgaHdmi
     .oled_dc(oled_dc),
     .oled_clk(oled_clk),
     .oled_data(oled_data),
+    .blend(status[7]),
     .hsync(HSync),
     .vsync(VSync),
     .hblank(HBlank),
     .vblank(VBlank),
     .pixelValue(pixelValue),
+    .pixelLevel(pixelLevel),
     .ce_pix(ce_pix)
 );
 
@@ -282,11 +286,23 @@ always @ (posedge clk_sys) if (palette_download & ioctl_wr) palette <= {palette[
 wire [23:0] color_fg = status[6] ? palette[55:32]   : palette[127:104];
 wire [23:0] color_bg = status[6] ? palette[127:104] : palette[55:32];
 
+wire [23:0] grey_fg = status[2] ? color_fg : 24'hFFFFFF;
+wire [23:0] grey_bg = status[2] ? color_bg : 24'h000000;
+
+function [7:0] mix(input [7:0] fg, input [7:0] bg, input [2:0] lvl);
+    mix = ({2'd0, fg} * lvl + {2'd0, bg} * (3'd4 - lvl)) >> 2;
+endfunction
+
+reg [23:0] rgb_grey;
+always @ (posedge clk_sys) rgb_grey <= {mix(grey_fg[23:16], grey_bg[23:16], pixelLevel),
+                                         mix(grey_fg[15:8],  grey_bg[15:8],  pixelLevel),
+                                         mix(grey_fg[7:0],   grey_bg[7:0],   pixelLevel)};
+
 arcade_video #(256,24) arcade_video
 (
     .*,
     .clk_video(clk_sys),
-    .RGB_in(status[2] ? (pixelValue ? color_fg : color_bg) : {24{pixelValue}}),
+    .RGB_in(status[7] ? rgb_grey : status[2] ? (pixelValue ? color_fg : color_bg) : {24{pixelValue}}),
     .gamma_bus(),
     .fx(status[5:3])
 );

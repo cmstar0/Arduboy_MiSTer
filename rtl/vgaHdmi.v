@@ -26,15 +26,18 @@ module vgaHdmi
   input oled_dc,
   input oled_clk,
   input oled_data,
+  input blend,
 
   output reg ce_pix,
   output reg hsync, vsync,
   output reg hblank, vblank,
-  output     pixelValue
+  output     pixelValue,
+  output     [2:0] pixelLevel
 );
 
 reg  [7:0] mem [1024];
-reg  [9:0] waddr, raddr;
+reg  [9:0] waddr, raddr, vaddr;
+reg  [2:0] vrow;
 
 reg        invert;
 reg  [2:0] shiftCount;
@@ -85,6 +88,40 @@ end
 
 wire [7:0] tempByte = mem[raddr];
 
+// Greyscale: sample the frame buffer into four history frames at ~135 Hz and
+// output how many of them have the pixel lit.
+localparam BYTE_DIV = 289; // 40 MHz / (289 * 1024) = 135 Hz
+
+reg  [8:0] cdiv;
+reg  [9:0] caddr;
+reg  [1:0] slot;
+wire       copy_tick = blend && cdiv == BYTE_DIV - 1;
+
+always @ (posedge clock) begin
+    raddr <= blend ? caddr : vaddr;
+    cdiv  <= copy_tick ? 9'd0 : cdiv + 1'd1;
+    if (copy_tick) begin
+        caddr <= caddr + 1'd1;
+        if (&caddr) slot <= slot + 1'd1;
+    end
+end
+
+wire [31:0] hq;
+genvar i;
+generate
+    for (i = 0; i < 4; i = i + 1) begin : hist
+        reg [7:0] ram [1024];
+        reg [7:0] q;
+        always @ (posedge clock) begin
+            if (copy_tick && slot == i) ram[caddr] <= tempByte;
+            q <= ram[vaddr];
+        end
+        assign hq[i*8 +: 8] = q;
+    end
+endgenerate
+
+wire [2:0] lit = hq[vrow] + hq[8 + vrow] + hq[16 + vrow] + hq[24 + vrow];
+
 reg ce_pix_pre, ce_pix_int;
 always @ (posedge clock) begin
     reg [3:0] div;
@@ -97,7 +134,9 @@ always @ (posedge clock) begin
 end
 
 assign pixelValue = pixel & ~vblank_int;
+assign pixelLevel = vblank_int ? 3'd0 : level;
 reg pixel, vblank_int;
+reg [2:0] level;
 
 // Manejo de Pixeles y Sincronizacion
 always @ (posedge clock) begin
@@ -123,10 +162,11 @@ always @ (posedge clock) begin
         end
     end
 
-    if (old_ce) raddr <= {pixelV[5:3],pixelH[6:0]};
+    if (old_ce) {vrow, vaddr} <= {pixelV[2:0], pixelV[5:3], pixelH[6:0]};
 
     if (ce_pix_int) begin
         pixel <= invertLatched ^ tempByte[pixelV[2:0]];
+        level <= invertLatched ? 3'd4 - lit : lit;
 
         if(pixelV == 127) vblank     <= 0;
         if(pixelV == 0)   vblank_int <= 0;
