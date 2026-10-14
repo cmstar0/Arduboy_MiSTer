@@ -24,9 +24,9 @@
 // TIFR4 bit positions (15.12.13), not TIFR0's -- this module is the 32U4's Timer4.
 // TIMSK below was already remapped; the flag register was not, so mask and flag
 // disagreed and a poll of TOV4 read bit 0. Bits 3:0 are reserved on TIFR4.
-`define TOV0 2
-`define OCF0A 6
-`define OCF0B 5
+`define TOV4 2
+`define OCF4A 6
+`define OCF4B 5
 `define OCF0C 3
 `define OCF0D 7
 
@@ -314,17 +314,17 @@ begin
     begin
         if(tov_p ^ tov_n)
         begin
-            TIFR[`TOV0] <= 1'b1;
+            TIFR[`TOV4] <= 1'b1;
             tov_n <= tov_p;
         end
         if(ocra_p ^ ocra_n)
         begin
-            TIFR[`OCF0A] <= 1'b1;
+            TIFR[`OCF4A] <= 1'b1;
             ocra_n <= ocra_p;
         end
         if(ocrb_p ^ ocrb_n)
         begin
-            TIFR[`OCF0B] <= 1'b1;
+            TIFR[`OCF4B] <= 1'b1;
             ocrb_n <= ocrb_p;
         end
         if(ocrd_p ^ ocrd_n)
@@ -334,15 +334,15 @@ begin
         end
         if(tov_int_rst)
         begin
-            TIFR[`TOV0] <= 1'b0;
+            TIFR[`TOV4] <= 1'b0;
         end
         if(ocra_int_rst)
         begin
-            TIFR[`OCF0A] <= 1'b0;
+            TIFR[`OCF4A] <= 1'b0;
         end
         if(ocrb_int_rst)
         begin
-            TIFR[`OCF0B] <= 1'b0;
+            TIFR[`OCF4B] <= 1'b0;
         end
         if(ocrd_int_rst)
         begin
@@ -564,9 +564,9 @@ begin
     end
 end
 
-assign tov_int = TIFR[`TOV0] & TIMSK[`TOIE0];
-assign ocra_int = TIFR[`OCF0A] & TIMSK[`OCIE0A];
-assign ocrb_int = TIFR[`OCF0B] & TIMSK[`OCIE0B];
+assign tov_int = TIFR[`TOV4] & TIMSK[`TOIE0];
+assign ocra_int = TIFR[`OCF4A] & TIMSK[`OCIE0A];
+assign ocrb_int = TIFR[`OCF4B] & TIMSK[`OCIE0B];
 assign ocrd_int = TIFR[`OCF0D] & TIMSK[`OCIE0D];
 
 assign ocan = ~oca;
