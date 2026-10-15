@@ -26,12 +26,18 @@ module vgaHdmi
   input oled_dc,
   input oled_clk,
   input oled_data,
+  input frame_sync,
+  input greyscale,
 
   output reg ce_pix,
   output reg hsync, vsync,
   output reg hblank, vblank,
-  output     pixelValue
+  output     pixelValue,
+  output     [2:0] pixelLevel
 );
+
+localparam N  = 6;      // frames blended for greyscale
+localparam NB = N + 3;  // up to three commits per video frame never overwrite a shown bank
 
 reg  [7:0] mem [1024];
 reg  [9:0] waddr, raddr;
@@ -83,7 +89,100 @@ always @ (posedge clk_avr) begin
   end
 end
 
+// A frame is complete after 1024 data bytes, or 1 ms after the last byte of a shorter burst.
+wire       wr_byte = oled_clk_rise & oled_dc & (shiftCount == 3'b111);
+reg  [9:0] nbytes;
+reg [13:0] idle;
+reg        commit = 0;
+
+always @ (posedge clk_avr) begin
+  if(reset) begin
+    nbytes <= 0;
+    idle   <= 0;
+  end
+  else if(wr_byte) begin
+    nbytes <= nbytes + 1'd1;
+    idle   <= 0;
+    if(&nbytes) commit <= ~commit;
+  end
+  else if(nbytes) begin
+    idle <= idle + 1'd1;
+    if(idle == 14'd15999) begin
+      nbytes <= 0;
+      idle   <= 0;
+      commit <= ~commit;
+    end
+  end
+end
+
 wire [7:0] tempByte = mem[raddr];
+
+// Copy each complete frame from mem into the next bank of an NB-bank ring.
+wire       latch = frame_sync | greyscale;
+reg  [2:0] commit_s = 0;
+reg        pend = 0, copying = 0;
+reg [10:0] cidx;
+reg  [3:0] ctgt = 0, chead = 0, dhead = 0;
+reg        cw_en = 0;
+reg  [9:0] cw_addr;
+
+function [3:0] next(input [3:0] b); next = (b == NB - 1) ? 4'd0 : b + 1'd1; endfunction
+function shown(input [3:0] b, input [3:0] h); shown = ((h + NB - b) % NB) < N; endfunction
+
+always @ (posedge clock) begin
+  commit_s <= {commit_s[1:0], commit};
+
+  cw_en   <= copying & ~cidx[10];
+  cw_addr <= cidx[9:0];
+
+  if(copying) begin
+    if(cidx[10]) begin
+      copying <= 0;
+      chead   <= ctgt;
+    end
+    else cidx <= cidx + 1'd1;
+  end
+  else if(pend) begin
+    pend <= 0;
+    // ring full: drop this frame rather than overwrite one on screen
+    if(latch && !shown(next(chead), dhead)) begin
+      copying <= 1;
+      cidx    <= 0;
+      ctgt    <= next(chead);
+    end
+  end
+
+  if(commit_s[2] ^ commit_s[1]) pend <= 1;
+end
+
+reg  [9:0] vaddr;
+reg  [2:0] vrow;
+wire [NB*8-1:0] bank_q;
+
+genvar i;
+generate
+  for(i = 0; i < NB; i = i + 1) begin : bank
+    reg [7:0] ram [1024];
+    reg [7:0] q;
+    always @ (posedge clock) begin
+      if(cw_en && ctgt == i) ram[cw_addr] <= tempByte;
+      q <= ram[vaddr];
+    end
+    assign bank_q[i*8 +: 8] = q;
+  end
+endgenerate
+
+// head = newest shown bank; lit = pixels set across the N shown banks
+integer    k;
+reg  [3:0] lit;
+always @(*) begin
+  lit = 0;
+  for(k = 0; k < NB; k = k + 1)
+    if(shown(k[3:0], dhead)) lit = lit + bank_q[k*8 + vrow];
+end
+
+wire       head = bank_q[dhead*8 + vrow];
+wire [2:0] lvl  = (lit * 4 + N / 2) / N;
 
 reg ce_pix_pre, ce_pix_int;
 always @ (posedge clock) begin
@@ -97,7 +196,9 @@ always @ (posedge clock) begin
 end
 
 assign pixelValue = pixel & ~vblank_int;
+assign pixelLevel = vblank_int ? 3'd0 : level;
 reg pixel, vblank_int;
+reg [2:0] level;
 
 // Manejo de Pixeles y Sincronizacion
 always @ (posedge clock) begin
@@ -123,14 +224,20 @@ always @ (posedge clock) begin
         end
     end
 
-    if (old_ce) raddr <= {pixelV[5:3],pixelH[6:0]};
+    if (copying) raddr <= cidx[9:0];
+    else if (old_ce) raddr <= {pixelV[5:3],pixelH[6:0]};
+    if (old_ce) {vrow, vaddr} <= {pixelV[2:0],pixelV[5:3],pixelH[6:0]};
 
     if (ce_pix_int) begin
-        pixel <= invertLatched ^ tempByte[pixelV[2:0]];
+        pixel <= invertLatched ^ (latch ? head : tempByte[pixelV[2:0]]);
+        level <= invertLatched ? 3'd4 - lvl : lvl;
 
         if(pixelV == 127) vblank     <= 0;
         if(pixelV == 0)   vblank_int <= 0;
-        if(pixelV == 64)  vblank_int <= 1;
+        if(pixelV == 64) begin
+            vblank_int <= 1;
+            dhead      <= chead;
+        end
         if(pixelV == 68)  vblank     <= 1;
 
         vsync  <= (pixelV[7:1] == 47);
