@@ -36,7 +36,7 @@ module vgaHdmi
 reg  [7:0] mem [1024];
 reg  [9:0] waddr, raddr;
 
-reg        invert;
+reg        invert, segflip, comflip;
 reg  [2:0] shiftCount;
 reg  [7:0] shiftReg;
 wire [7:0] shiftLeft = {shiftReg[6:0], oled_data};
@@ -54,6 +54,8 @@ always @ (posedge clk_avr) begin
   if(reset) begin
     waddr         <= 0;
     invert        <= 0;
+    segflip       <= 0;
+    comflip       <= 0;
     shiftCount    <= 0;
     shiftReg      <= 0;
     pageCount     <= 0;
@@ -61,7 +63,7 @@ always @ (posedge clk_avr) begin
   else if(oled_clk_rise) begin
     if (oled_dc) begin // data
       if (shiftCount == 3'b111) begin
-        mem[waddr] <= shiftLeft;
+        mem[{waddr[9:7], waddr[6:0] ^ {7{segflip}}}] <= shiftLeft;
         waddr <= waddr + 1'b1; // Increment address
       end
       else shiftReg <= shiftLeft;
@@ -70,6 +72,8 @@ always @ (posedge clk_avr) begin
     else begin // commands
       if (shiftCount == 3'b111) begin
         if(shiftLeft[7:1] == 'b1010011) invert <= shiftLeft[0]; // invert (A6/A7)
+        if(shiftLeft[7:1] == 'b1010000) segflip <= ~shiftLeft[0]; // segment remap (A0/A1)
+        if({shiftLeft[7:4], shiftLeft[2:0]} == 'b1100000) comflip <= ~shiftLeft[3]; // COM scan direction (C0/C8)
         if(shiftLeft[7:3] == 'b10110) waddr <= {shiftLeft[2:0], 7'b000_0000}; // page 0-7 (B0-B7)
         if(shiftLeft == 8'h22) begin // for games using https://github.com/akkera102/08_gamebuino
           waddr <= {pageCount, 7'b000_0000};
@@ -101,7 +105,7 @@ reg pixel, vblank_int;
 
 // Manejo de Pixeles y Sincronizacion
 always @ (posedge clock) begin
-    reg       invertLatched;
+    reg       invertLatched, comflipLatched;
     reg       old_ce;
     reg       vdiv;
     reg [7:0] pixelH, pixelV;
@@ -117,16 +121,17 @@ always @ (posedge clock) begin
                 pixelV <= pixelV + 1'd1;
                 if(pixelV == 130) begin
                     invertLatched <= invert;
+                    comflipLatched <= comflip;
                     pixelV <= 0;
                 end
             end
         end
     end
 
-    if (old_ce) raddr <= {pixelV[5:3],pixelH[6:0]};
+    if (old_ce) raddr <= {pixelV[5:3] ^ {3{comflipLatched}},pixelH[6:0]};
 
     if (ce_pix_int) begin
-        pixel <= invertLatched ^ tempByte[pixelV[2:0]];
+        pixel <= invertLatched ^ tempByte[pixelV[2:0] ^ {3{comflipLatched}}];
 
         if(pixelV == 127) vblank     <= 0;
         if(pixelV == 0)   vblank_int <= 0;
