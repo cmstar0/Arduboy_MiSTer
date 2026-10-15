@@ -187,10 +187,10 @@ module mega #(
 	// instruction fetch.
 	input spm_pgm_write_ack,
 	input [(VECTOR_INT_TABLE_SIZE == 0 ? 0 : VECTOR_INT_TABLE_SIZE - 1):0]int_sig,
-	output reg [(VECTOR_INT_TABLE_SIZE == 0 ? 0 : VECTOR_INT_TABLE_SIZE - 1):0]int_rst
+	output reg [(VECTOR_INT_TABLE_SIZE == 0 ? 0 : VECTOR_INT_TABLE_SIZE - 1):0]int_rst,
+	output reg wdt_rst_out
     );
 
-reg wdt_rst_out;
 wire core_rst;
 assign sys_rst_out = core_rst;
 
@@ -786,7 +786,7 @@ begin
 				SREG <= sreg_out;
 	/* Set "WDR" */ /*************************************************************/
 				casex({execute, state_cnt, CORE_TYPE, pgm_data_registered})
-				{1'b1, `STEP0, `INSTRUCTION_WDR}: wdt_rst_out <= WATCHDOG_CNT_WIDTH ? 1'b1 : 1'b0;
+				{1'b1, `STEP0, `INSTRUCTION_WDR}: wdt_rst_out <= 1'b1;
 				endcase
 	/* Set "SREG" */ /*************************************************************/
 				casex({execute, state_cnt, CORE_TYPE, pgm_data_registered})

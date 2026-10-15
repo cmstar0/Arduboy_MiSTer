@@ -295,6 +295,21 @@ begin
             // OCRA
             if(updt_ocr_on_top ? (TCNT == 8'hff):(TCNT == OCRA_int))
                 OCRA_int <= OCRA;
+            // Fast PWM (WGM 011 and 111) drives the compare output at BOTTOM as well as on the
+            // match; only the match was implemented, so the pin cleared on the first match and
+            // never returned. ATmega644 doc2593O S15.7.3: "the Output Compare (OC2x) is cleared
+            // on the compare match between TCNT2 and OCR2x, and set at BOTTOM"; Table 15-3
+            // COM2A=10 likewise. Placed ahead of the match block so OCRA==BOTTOM still resolves
+            // low, preserving the existing 0%-duty behaviour rather than emitting the
+            // datasheet's narrow spike.
+            if(TCNT == 8'h00 && ({TCCRB[`WGM02], TCCRA[`WGM01:`WGM00]} == 3'h3
+                              || {TCCRB[`WGM02], TCCRA[`WGM01:`WGM00]} == 3'h7))
+            begin
+                case(TCCRA[`COM0A1:`COM0A0])
+                    2'h2: oca <= 1'b1;
+                    2'h3: oca <= 1'b0;
+                endcase
+            end
             if(TCNT == OCRA_int)
             begin
                 case({TCCRB[`WGM02], TCCRA[`WGM01:`WGM00]})
@@ -335,6 +350,15 @@ begin
                 // OCRB
                 if(updt_ocr_on_top ? (TCNT == 8'hff):(TCNT == OCRB_int))
                     OCRB_int <= OCRB;
+                // Set at BOTTOM, same as OCRA above.
+                if(TCNT == 8'h00 && ({TCCRB[`WGM02], TCCRA[`WGM01:`WGM00]} == 3'h3
+                                  || {TCCRB[`WGM02], TCCRA[`WGM01:`WGM00]} == 3'h7))
+                begin
+                    case(TCCRA[`COM0B1:`COM0B0])
+                        2'h2: ocb <= 1'b1;
+                        2'h3: ocb <= 1'b0;
+                    endcase
+                end
                 if(TCNT == OCRB_int)
                 begin
                     case({TCCRB[`WGM02], TCCRA[`WGM01:`WGM00]})

@@ -7,6 +7,7 @@ set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) atmega-
 set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) atmega-tim-10bit.v ]
 set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) atmega-tim-16bit.v ]
 set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) atmega-uart.v ]
+set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) atmega-wdt.v ]
 set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) mega-reg.v ]
 set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) mega-ram.v ]
 set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) mega-alu.v ]
