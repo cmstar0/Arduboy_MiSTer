@@ -27,7 +27,8 @@ module vgaHdmi
   input oled_clk,
   input oled_data,
   input frame_sync,
-  input greyscale,
+  input [1:0] greyscale, // off, blend 2 frames, blend 3 frames
+  input rate62,          // 250 lines: 62.5 Hz, the Arduboy2 frame rate
 
   output reg ce_pix,
   output reg hsync, vsync,
@@ -36,8 +37,7 @@ module vgaHdmi
   output     [2:0] pixelLevel
 );
 
-localparam N  = 6;      // frames blended for greyscale
-localparam NB = N + 3;  // up to three commits per video frame never overwrite a shown bank
+localparam NB = 6;  // up to 3 shown banks; up to three commits per video frame never overwrite one
 
 reg  [7:0] mem [1024];
 reg  [9:0] waddr, raddr;
@@ -122,16 +122,17 @@ end
 wire [7:0] tempByte = mem[raddr];
 
 // Copy each complete frame from mem into the next bank of an NB-bank ring.
-wire       latch = frame_sync | greyscale;
+wire       latch = frame_sync | |greyscale;
+wire [1:0] n     = (greyscale == 2'd2) ? 2'd3 : 2'd2;
 reg  [2:0] commit_s = 0;
 reg        pend = 0, copying = 0;
 reg [10:0] cidx;
-reg  [3:0] ctgt = 0, chead = 0, dhead = 0;
+reg  [2:0] ctgt = 0, chead = 0, dhead = 0;
 reg        cw_en = 0;
 reg  [9:0] cw_addr;
 
-function [3:0] next(input [3:0] b); next = (b == NB - 1) ? 4'd0 : b + 1'd1; endfunction
-function shown(input [3:0] b, input [3:0] h); shown = ((h + NB - b) % NB) < N; endfunction
+function [2:0] next(input [2:0] b); next = (b == NB - 1) ? 3'd0 : b + 1'd1; endfunction
+function shown(input [2:0] b, input [2:0] h, input [1:0] cnt); shown = ((h >= b) ? h - b : h + NB - b) < cnt; endfunction
 
 always @ (posedge clock) begin
   commit_s <= {commit_s[1:0], commit};
@@ -149,7 +150,7 @@ always @ (posedge clock) begin
   else if(pend) begin
     pend <= 0;
     // ring full: drop this frame rather than overwrite one on screen
-    if(latch && !shown(next(chead), dhead)) begin
+    if(latch && !shown(next(chead), dhead, n)) begin
       copying <= 1;
       cidx    <= 0;
       ctgt    <= next(chead);
@@ -176,17 +177,17 @@ generate
   end
 endgenerate
 
-// head = newest shown bank; lit = pixels set across the N shown banks
+// head = newest shown bank; lit = pixels set across the n shown banks, lvl = lit/n in quarters
 integer    k;
-reg  [3:0] lit;
+reg  [1:0] lit;
 always @(*) begin
   lit = 0;
   for(k = 0; k < NB; k = k + 1)
-    if(shown(k[3:0], dhead)) lit = lit + bank_q[k*8 + vrow];
+    if(shown(k[2:0], dhead, n)) lit = lit + bank_q[{k[2:0], vrow}];
 end
 
-wire       head = bank_q[dhead*8 + vrow];
-wire [2:0] lvl  = (lit * 4 + N / 2) / N;
+wire       head = bank_q[{dhead, vrow}];
+wire [2:0] lvl  = (n == 2'd2) ? {lit, 1'b0} : (lit == 2'd0) ? 3'd0 : (lit == 2'd1) ? 3'd1 : (lit == 2'd2) ? 3'd3 : 3'd4;
 
 reg ce_pix_pre, ce_pix_int;
 always @ (posedge clock) begin
@@ -220,7 +221,7 @@ always @ (posedge clock) begin
             vdiv <= ~vdiv;
             if(vdiv) begin
                 pixelV <= pixelV + 1'd1;
-                if(pixelV == 130) begin
+                if(pixelV >= (rate62 ? 8'd124 : 8'd130)) begin
                     invertLatched <= invert;
                     comflipLatched <= comflip;
                     pixelV <= 0;
@@ -237,7 +238,7 @@ always @ (posedge clock) begin
         pixel <= invertLatched ^ (latch ? head : tempByte[pixelV[2:0] ^ {3{comflipLatched}}]);
         level <= invertLatched ? 3'd4 - lvl : lvl;
 
-        if(pixelV == 127) vblank     <= 0;
+        if(pixelV == (rate62 ? 8'd121 : 8'd127)) vblank <= 0;
         if(pixelV == 0)   vblank_int <= 0;
         if(pixelV == 64) begin
             vblank_int <= 1;
