@@ -27,7 +27,7 @@ module vgaHdmi
   input oled_clk,
   input oled_data,
   input frame_sync,
-  input [1:0] greyscale, // off, blend 2 frames, blend 3 frames
+  input [1:0] greyscale, // off, blend 2 frames, blend 3 frames, checkerboard
   input rate62,          // 250 lines: 62.5 Hz, the Arduboy2 frame rate
 
   output reg ce_pix,
@@ -37,7 +37,7 @@ module vgaHdmi
   output     [2:0] pixelLevel
 );
 
-localparam NB = 6;  // up to 3 shown banks; up to three commits per video frame never overwrite one
+localparam NB = 6;  // up to 4 shown banks; a commit that would overwrite one is dropped
 
 reg  [7:0] mem [1024];
 reg  [9:0] waddr, raddr;
@@ -123,7 +123,8 @@ wire [7:0] tempByte = mem[raddr];
 
 // Copy each complete frame from mem into the next bank of an NB-bank ring.
 wire       latch = frame_sync | |greyscale;
-wire [1:0] n     = (greyscale == 2'd2) ? 2'd3 : 2'd2;
+wire       chk   = (greyscale == 2'd3);
+wire [2:0] n     = chk ? 3'd4 : (greyscale == 2'd2) ? 3'd3 : 3'd2;
 reg  [2:0] commit_s = 0;
 reg        pend = 0, copying = 0;
 reg [10:0] cidx;
@@ -132,7 +133,8 @@ reg        cw_en = 0;
 reg  [9:0] cw_addr;
 
 function [2:0] next(input [2:0] b); next = (b == NB - 1) ? 3'd0 : b + 1'd1; endfunction
-function shown(input [2:0] b, input [2:0] h, input [1:0] cnt); shown = ((h >= b) ? h - b : h + NB - b) < cnt; endfunction
+function [2:0] prev(input [2:0] b); prev = (b == 0) ? NB - 1 : b - 1'd1; endfunction
+function shown(input [2:0] b, input [2:0] h, input [2:0] cnt); shown = ((h >= b) ? h - b : h + NB - b) < cnt; endfunction
 
 always @ (posedge clock) begin
   commit_s <= {commit_s[1:0], commit};
@@ -186,8 +188,22 @@ always @(*) begin
     if(shown(k[2:0], dhead, n)) lit = lit + bank_q[{k[2:0], vrow}];
 end
 
+// checkerboard: grey where the newest frame is a 1-px checker (3x3), or the pixel flips every frame
+// (4 frames); newest bank's 3x3 read over the pixel period, other page = row above/below the byte
+reg  [5:0] rd;
+reg  [7:0] nl, nc, nr, ol, oc;
+reg  [2:0] olds;
+reg        inner;
+wire [7:0] nq  = bank_q[{dhead, 3'b000} +: 8];
+wire [9:0] sl  = {ol[0], nl, ol[7]}, sc = {oc[0], nc, oc[7]}, sr = {nq[0], nr, nq[7]};
+wire [3:0] vi  = vrow + 4'd1;
+wire       px  = sc[vi];
+wire       ctr = sc[vi-1] != px && sc[vi+1] != px && sl[vi] != px && sr[vi] != px &&
+                 sl[vi-1] == px && sl[vi+1] == px && sr[vi-1] == px && sr[vi+1] == px;
+wire       flp = px != olds[0] && px == olds[1] && olds[0] == olds[2];
+
 wire       head = bank_q[{dhead, vrow}];
-wire [2:0] lvl  = (n == 2'd2) ? {lit, 1'b0} : (lit == 2'd0) ? 3'd0 : (lit == 2'd1) ? 3'd1 : (lit == 2'd2) ? 3'd3 : 3'd4;
+wire [2:0] lvl  = chk ? ((inner & ctr) | flp ? 3'd2 : {px, 2'b00}) : (n == 3'd2) ? {lit, 1'b0} : (lit == 2'd0) ? 3'd0 : (lit == 2'd1) ? 3'd1 : (lit == 2'd2) ? 3'd3 : 3'd4;
 
 reg ce_pix_pre, ce_pix_int;
 always @ (posedge clock) begin
@@ -234,8 +250,26 @@ always @ (posedge clock) begin
     else if (old_ce) raddr <= {pixelV[5:3] ^ {3{comflipLatched}},pixelH[6:0]};
     if (old_ce) {vrow, vaddr} <= {pixelV[2:0] ^ {3{comflipLatched}},pixelV[5:3] ^ {3{comflipLatched}},pixelH[6:0]};
 
+    rd <= {rd[4:0], old_ce};
+    if (chk) begin
+        if (old_ce) inner <= pixelV[5:0] != 0 && pixelV[5:0] != 63 && pixelH[6:0] != 0 && pixelH[6:0] != 127;
+        if (rd[0]) vaddr[6:0] <= pixelH[6:0] - 1'd1;
+        if (rd[1]) vaddr[6:0] <= pixelH[6:0] + 1'd1;
+        if (rd[2]) vaddr <= {|vrow ? vaddr[9:7] + 1'd1 : vaddr[9:7] - 1'd1, pixelH[6:0] - 1'd1};
+        if (rd[3]) vaddr[6:0] <= pixelH[6:0];
+        if (rd[4]) vaddr[6:0] <= pixelH[6:0] + 1'd1;
+        if (rd[1]) begin
+            nc   <= nq;
+            olds <= {bank_q[{prev(prev(prev(dhead))), vrow}], bank_q[{prev(prev(dhead)), vrow}], bank_q[{prev(dhead), vrow}]};
+        end
+        if (rd[2]) nl <= nq;
+        if (rd[3]) nr <= nq;
+        if (rd[4]) ol <= nq;
+        if (rd[5]) oc <= nq;
+    end
+
     if (ce_pix_int) begin
-        pixel <= invertLatched ^ (latch ? head : tempByte[pixelV[2:0] ^ {3{comflipLatched}}]);
+        pixel <= invertLatched ^ (chk ? px : latch ? head : tempByte[pixelV[2:0] ^ {3{comflipLatched}}]);
         level <= invertLatched ? 3'd4 - lvl : lvl;
 
         if(pixelV == (rate62 ? 8'd121 : 8'd127)) vblank <= 0;

@@ -98,7 +98,7 @@ localparam CONF_STR =
     "O89,Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
     "O35,Scandoubler Fx,None,HQ2x,CRT 25%,CRT 50%,CRT 75%;",
     "OA,Frame Sync,Off,On;",
-    "OBC,Greyscale,Off,2 Frames,3 Frames;",
+    "OBC,Greyscale,Off,2 Frames,3 Frames,Checkerboard;",
     "OD,Refresh Rate,Standard,Arduboy 62.5Hz;",
     "OFG,ADC,Random,AnalogStick,Paddle;",
     "-;",
