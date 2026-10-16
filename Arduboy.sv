@@ -86,7 +86,7 @@ end
 // 0         1         2         3          4         5         6
 // 01234567890123456789012345678901 23456789012345678901234567890123
 // 0123456789ABCDEFGHIJKLMNOPQRSTUV 0123456789ABCDEFGHIJKLMNOPQRSTUV
-// XXXXXXX XXXXXX XX
+// XXXXXXX XXX    XX
 
 `include "build_id.v"
 localparam CONF_STR =
@@ -97,9 +97,7 @@ localparam CONF_STR =
     "O1,Orientation,Horizontal,Vertical;",
     "O89,Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
     "O35,Scandoubler Fx,None,HQ2x,CRT 25%,CRT 50%,CRT 75%;",
-    "OA,Frame Sync,Off,On;",
-    "OBC,Greyscale,Off,2 Frames,3 Frames,Checkerboard;",
-    "OD,Refresh Rate,Standard,Arduboy 62.5Hz;",
+    "OA,Greyscale,Off,3 Frames;",
     "OFG,ADC,Random,AnalogStick,Paddle;",
     "-;",
     "O2,Custom Palette,Off,On;",
@@ -269,9 +267,7 @@ vgaHdmi vgaHdmi
     .oled_dc(oled_dc),
     .oled_clk(oled_clk),
     .oled_data(oled_data),
-    .frame_sync(status[10]),
-    .greyscale(status[12:11]),
-    .rate62(status[13]),
+    .greyscale(status[10]),
     .hsync(HSync),
     .vsync(VSync),
     .hblank(HBlank),
@@ -306,7 +302,7 @@ arcade_video #(256,24) arcade_video
 (
     .*,
     .clk_video(clk_sys),
-    .RGB_in(|status[12:11] ? rgb_grey : status[2] ? (pixelValue ? color_fg : color_bg) : {24{pixelValue}}),
+    .RGB_in(status[10] ? rgb_grey : status[2] ? (pixelValue ? color_fg : color_bg) : {24{pixelValue}}),
     .gamma_bus(),
     .fx(status[5:3])
 );
